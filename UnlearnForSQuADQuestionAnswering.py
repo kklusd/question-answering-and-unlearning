@@ -22,7 +22,7 @@ class ModelConfig:
         self.pretrained_model_dir = os.path.join(self.project_dir, "bert_base_uncased_english")
         self.vocab_path = os.path.join(self.pretrained_model_dir, 'vocab.txt')
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.train_file_path = os.path.join(self.dataset_dir, 'train-v1.1.json')
+        self.train_file_path = os.path.join(self.dataset_dir,'train-v1.1.json' )#'train-v1.1.json'
         self.test_file_path = os.path.join(self.dataset_dir, 'dev-v1.1.json')
         self.unlearn_file_path = os.path.join(self.dataset_dir, 'unlearn-v1.1.json')
         self.forget_ids_path = os.path.join(self.dataset_dir, 'forget_ids.json')
@@ -41,6 +41,7 @@ class ModelConfig:
         self.doc_stride = 128  # 滑动窗口一次滑动的长度
         self.epochs = 1
         self.model_val_per_epoch = 1
+        self.unmethod = 'GD' #
         logger_init(log_file_name='unlearn', log_level=logging.DEBUG,
                     log_dir=self.logs_save_dir)
         if not os.path.exists(self.model_save_dir):
@@ -104,11 +105,12 @@ def train(config):
                                                    attention_mask=padding_mask,
                                                    token_type_ids=batch_seg,
                                                    position_ids=None,
-                                                   )
+                                                   ) # [src_len, batch_size][batchsize,sentencelen]
             loss, forget_loss, retain_loss = unlearn_loss(start_logits=start_logits, end_logits=end_logits,
                                                           start_positions=batch_label[:, 0],
                                                           end_positions=batch_label[:, 1],
-                                                      forget_labels = batch_forget_labels)
+                                                      forget_labels = batch_forget_labels,
+                                                          method = config.unmethod)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
