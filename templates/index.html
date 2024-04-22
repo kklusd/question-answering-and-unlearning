@@ -1,0 +1,38 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html >
+<head>
+  <meta charset="UTF-8">
+  <title>ML API</title>
+</head>
+<body>
+ <div class="login">
+    <h1>Question answering</h1>
+    <form action="{{url_for('inference')}}" method="POST">
+      <p>
+        <label for="text-input">Please input the context:</label>
+        <textarea name="context" cols="50" rows="10"></textarea>
+      </p>
+      <p>
+        <label for="text-input">Please input the question:</label>
+        <textarea name="question" cols="50" rows="2"></textarea> 
+      </p>
+      <p>
+        Select a model:
+        <select name="model">
+            <option value="original" selected>Original Model</option>
+            <option value="gradient_ascent" >Gradient Ascent</option>
+            <option value="gradient_difference" >Gradient Difference</option>
+            <option value="distill" >KL Minimization</option>
+        </select>
+      </p>
+      <p>
+        <input type="submit" value="Submit">
+      </p>
+    </form>
+
+   <br>
+   {{ prediction_text }}  <!-- 这一块是模型输出结果 -->
+ </div>
+</body>
+</html>

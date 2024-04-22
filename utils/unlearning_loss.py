@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
 
 def unlearn_loss(start_logits,
                  end_logits,
@@ -32,14 +33,27 @@ def unlearn_loss(start_logits,
                forget_loss = 0
           else:
                forget_loss = torch.mean(forget_labels * start_loss + forget_labels * end_loss, dim=0) * (b / forget_size)
-               forget_loss = forget_loss.detach().item()
+               forget_loss = 0.5 * forget_loss.detach().item()
           if (b - forget_size).item() == 0:
                retain_loss = 0
           else:
                retain_loss = torch.mean((1-forget_labels) * start_loss + (1-forget_labels) * end_loss, dim=0) * b / (b-forget_size)
-               retain_loss = retain_loss.detach().item()
+               retain_loss = 0.5 * retain_loss.detach().item()
           start_loss = (1 - forget_labels) * start_loss - forget_labels * start_loss
           start_loss = torch.mean(start_loss, dim=0)
           end_loss = (1-forget_labels) * end_loss - forget_labels * end_loss
           end_loss = torch.mean(end_loss, dim=0)
           return (start_loss + end_loss) / 2, forget_loss, retain_loss
+
+def distill_loss(student_start_logits, student_end_logits, teacher_start_logits, teacher_end_logits, forget_labels, KL_temperature=1):
+     student_start_out = F.log_softmax(student_start_logits / KL_temperature, dim=1)
+     student_end_out = F.log_softmax(student_end_logits / KL_temperature, dim=1)
+     teacher_start_out = F.softmax(teacher_start_logits / KL_temperature, dim=1)
+     teacher_end_out = F.softmax(teacher_end_logits / KL_temperature, dim=1)
+     start_kl_loss = torch.sum(F.kl_div(student_start_out, teacher_start_out, reduction="none"), dim=1)
+     end_kl_loss = torch.sum(F.kl_div(student_end_out, teacher_end_out, reduction="none"), dim=1)
+     start_kl_loss = torch.mean((1-forget_labels) * start_kl_loss - forget_labels * start_kl_loss)
+     end_kl_loss = torch.mean((1-forget_labels) * end_kl_loss - forget_labels * end_kl_loss)
+     kl_loss = 0.5 * (start_kl_loss + end_kl_loss)
+
+     return kl_loss

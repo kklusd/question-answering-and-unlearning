@@ -3,14 +3,14 @@ import sys
 
 sys.path.append('../')
 from model.BasicBert.BertConfig import BertConfig
-from model.DownstreamTasks import BertForQuestionAnswering
+from model.UnleanringTasks.BertForQA_unlearning import BertForQuestionAnswering
 from utils.data_helpers import LoadSQuADQuestionAnsweringDataset
+from utils.unlearning_loss import unlearn_loss
 from utils.log_helper import logger_init
 from transformers import BertTokenizer
 from transformers import get_scheduler
 import logging
 import torch
-from tqdm import tqdm
 import os
 import time
 
@@ -24,12 +24,14 @@ class ModelConfig:
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.train_file_path = os.path.join(self.dataset_dir, 'train-v1.1.json')
         self.retain_file_path = os.path.join(self.dataset_dir, 'retain-v1.1.json')
-        self.forget_file_path = os.path.join(self.dataset_dir, 'forget-v1.1.json')
         self.test_file_path = os.path.join(self.dataset_dir, 'dev-v1.1.json')
-        self.val_file_path = os.path.join(self.dataset_dir, "dev-v1.1.json")
+        self.val_file_path = os.path.join(self.dataset_dir, 'dev-v1.1.json')
+        self.forget_file_path = os.path.join(self.dataset_dir, 'forget-v1.1.json')
+        self.forget_ids_path = os.path.join(self.dataset_dir, 'forget_ids.json')
         self.model_save_dir = os.path.join(self.project_dir, 'cache')
         self.logs_save_dir = os.path.join(self.project_dir, 'logs')
-        self.model_save_path = os.path.join(self.model_save_dir, 'original_model.pt')
+        self.original_model_path = os.path.join(self.model_save_dir, 'model.pt')
+        self.unlearn_model_path = os.path.join(self.model_save_dir, 'gradient_difference_model.pt')
         self.n_best_size = 10  # 对预测出的答案近后处理时，选取的候选答案数量
         self.max_answer_len = 30  # 在对候选进行筛选时，对答案最大长度的限制
         self.is_sample_shuffle = True  # 是否对训练集进行打乱
@@ -39,9 +41,9 @@ class ModelConfig:
         self.max_query_len = 64  # 表示问题的最大长度，超过长度截取
         self.learning_rate = 3.5e-5
         self.doc_stride = 128  # 滑动窗口一次滑动的长度
-        self.epochs = 21
+        self.epochs = 1
         self.model_val_per_epoch = 1
-        logger_init(log_file_name='qa', log_level=logging.DEBUG,
+        logger_init(log_file_name='gradient_difference', log_level=logging.DEBUG,
                     log_dir=self.logs_save_dir)
         if not os.path.exists(self.model_save_dir):
             os.makedirs(self.model_save_dir)
@@ -56,10 +58,10 @@ class ModelConfig:
         for key, value in self.__dict__.items():
             logging.info(f"### {key} = {value}")
 
-
 def main(config, only_for_eval=False):
     def train(config):
         model.train()
+
         optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
         lr_scheduler = get_scheduler(name='linear',
                                     optimizer=optimizer,
@@ -69,28 +71,30 @@ def main(config, only_for_eval=False):
         for epoch in range(config.epochs):
             losses = 0
             start_time = time.time()
-            for idx, (batch_input, batch_seg, batch_label, _, _, _, _) in enumerate(train_iter):
+            for idx, (batch_input, batch_seg, batch_label, _, _, _, _,batch_forget_labels) in enumerate(train_iter):
                 batch_input = batch_input.to(config.device)  # [src_len, batch_size]
                 batch_seg = batch_seg.to(config.device)
                 batch_label = batch_label.to(config.device)
+                batch_forget_labels = batch_forget_labels.to(config.device)
                 padding_mask = (batch_input == data_loader.PAD_IDX).transpose(0, 1)
-                loss, start_logits, end_logits = model(input_ids=batch_input,
+                start_logits, end_logits = model(input_ids=batch_input,
                                                     attention_mask=padding_mask,
                                                     token_type_ids=batch_seg,
                                                     position_ids=None,
-                                                    start_positions=batch_label[:, 0],
-                                                    end_positions=batch_label[:, 1])
+                                                    )
+                loss, forget_loss, retain_loss = unlearn_loss(start_logits=start_logits, end_logits=end_logits,
+                                                            start_positions=batch_label[:, 0],
+                                                            end_positions=batch_label[:, 1],
+                                                        forget_labels = batch_forget_labels)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 lr_scheduler.step()
                 losses += loss.item()
-                acc_start = (start_logits.argmax(1) == batch_label[:, 0]).float().mean()
-                acc_end = (end_logits.argmax(1) == batch_label[:, 1]).float().mean()
-                acc = (acc_start + acc_end) / 2
                 if idx % 10 == 0:
                     logging.info(f"Epoch: {epoch}, Batch[{idx}/{len(train_iter)}], "
-                                f"Train loss :{loss.item():.3f}, Train acc: {acc:.3f}")
+                                f"Total loss :{loss.item():.3f},  Forget loss :{forget_loss:.3f}  "
+                                f"Retain loss :{retain_loss:.3f}")
                 if idx % 100 == 0:
                     y_pred = [start_logits.argmax(1), end_logits.argmax(1)]
                     y_true = [batch_label[:, 0], batch_label[:, 1]]
@@ -98,18 +102,22 @@ def main(config, only_for_eval=False):
                                 y_pred=y_pred, y_true=y_true)
             end_time = time.time()
             train_loss = losses / len(train_iter)
-            logging.info(f"Epoch: {epoch}, Train loss: "
+            logging.info(f"Epoch: {epoch}, Unlearn loss: "
                         f"{train_loss:.3f}, Epoch time = {(end_time - start_time):.3f}s")
             if (epoch + 1) % config.model_val_per_epoch == 0:
-                acc = evaluate(val_iter, model,
+                val_acc = evaluate(val_iter, model,
                             config.device,
                             data_loader.PAD_IDX,
                             inference=False)
-                logging.info(f" ### Accuracy on val: {round(acc, 4)} max :{max_acc}")
-                if acc > max_acc:
-                    max_acc = acc
-                torch.save(model.state_dict(), config.model_save_path)
-    
+                forget_acc = evaluate(forget_iter, model,
+                            config.device,
+                            data_loader.PAD_IDX,
+                            inference=False)
+                logging.info(f" ### Accuracy on val: {round(val_acc, 4)} max :{max_acc}")
+                logging.info(f" ### Accuracy on forget: {round(forget_acc, 4)}")
+                if val_acc > max_acc:
+                    max_acc = val_acc
+                torch.save(model.state_dict(), config.unlearn_model_path)
     bert_tokenize = BertTokenizer.from_pretrained(config.pretrained_model_dir).tokenize
     data_loader = LoadSQuADQuestionAnsweringDataset(vocab_path=config.vocab_path,
                                                     tokenizer=bert_tokenize,
@@ -119,22 +127,25 @@ def main(config, only_for_eval=False):
                                                     max_position_embeddings=config.max_position_embeddings,
                                                     pad_index=config.pad_token_id,
                                                     is_sample_shuffle=config.is_sample_shuffle,
-                                                    doc_stride=config.doc_stride)
+                                                    doc_stride=config.doc_stride,
+                                                    forget_ids_path=config.forget_ids_path,
+                                                    unlearning=True
+                                                    )
     model = BertForQuestionAnswering(config, config.pretrained_model_dir)
     model = model.to(config.device)
     if only_for_eval:
-        if os.path.exists(config.model_save_path):
-            loaded_paras = torch.load(config.model_save_path, map_location=config.device)
+        if os.path.exists(config.unlearn_model_path):
+            loaded_paras = torch.load(config.unlearn_model_path, map_location=config.device)
             model.load_state_dict(loaded_paras)
             logging.info("## 成功载入已有模型，进行追加训练......")
         else:
-            raise ValueError("You should have an finetuned model!!!")
+            raise ValueError("You should have an unlearned model!!!")
+        model = model.to(config.device)
         retain_iter, test_iter, val_iter, forget_iter = \
         data_loader.load_train_val_test_data(train_file_path=config.retain_file_path,
                                             test_file_path=config.test_file_path,
                                             val_file_path=config.val_file_path,
                                             forget_file_path=config.forget_file_path,
-                                            unlearn=True,
                                             only_test=False)
         val_acc = evaluate(val_iter, model,
                             config.device,
@@ -151,13 +162,22 @@ def main(config, only_for_eval=False):
         # print(f" ### Accuracy on retain: {round(retain_acc, 4)}")
         print(f" ### Accuracy on val: {round(val_acc, 4)}")
         print(f" ### Accuracy on forget: {round(forget_acc, 4)}")
+
     else:
-        train_iter, test_iter, val_iter = \
-        data_loader.load_train_val_test_data(train_file_path=config.train_file_path,
-                                            test_file_path=config.test_file_path,
-                                            val_file_path=config.val_file_path,
-                                            only_test=False)
+        if os.path.exists(config.original_model_path):
+            loaded_paras = torch.load(config.original_model_path, map_location=config.device)
+            model.load_state_dict(loaded_paras)
+            logging.info("## 成功载入已有模型，进行追加训练......")
+        else:
+            raise ValueError("You should have a finetuned model!!!")
+        train_iter, test_iter, val_iter, forget_iter = \
+            data_loader.load_train_val_test_data(train_file_path=config.train_file_path,
+                                                test_file_path=config.test_file_path,
+                                                forget_file_path=config.forget_file_path,
+                                                unlearn=True,
+                                                only_test=False)
         train(config)
+    
 
 
 def evaluate(data_iter, model, device, PAD_IDX, inference=False):
@@ -165,7 +185,7 @@ def evaluate(data_iter, model, device, PAD_IDX, inference=False):
     with torch.no_grad():
         acc_sum, n = 0.0, 0
         all_results = collections.defaultdict(list)
-        for batch_input, batch_seg, batch_label, batch_qid, _, batch_feature_id, _ in tqdm(data_iter, leave=False):
+        for batch_input, batch_seg, batch_label, batch_qid, _, batch_feature_id, _, _ in data_iter:
             batch_input = batch_input.to(device)  # [src_len, batch_size]
             batch_seg = batch_seg.to(device)
             batch_label = batch_label.to(device)
@@ -236,12 +256,12 @@ def inference(config):
                                                                    only_test=True)
     model = BertForQuestionAnswering(config,
                                      config.pretrained_model_dir)
-    if os.path.exists(config.model_save_path):
-        loaded_paras = torch.load(config.model_save_path, map_location=config.device)
+    if os.path.exists(config.unlearn_model_path):
+        loaded_paras = torch.load(config.unlearn_model_path, map_location=config.device)
         model.load_state_dict(loaded_paras)
         logging.info("## 成功载入已有模型，开始进行推理......")
     else:
-        raise ValueError(f"## 模型{config.model_save_path}不存在，请检查路径或者先训练模型......")
+        raise ValueError(f"## 模型{config.unlearn_model_path}不存在，请检查路径或者先训练模型......")
 
     model = model.to(config.device)
     all_result_logits = evaluate(test_iter, model, config.device,

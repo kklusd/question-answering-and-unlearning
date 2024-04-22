@@ -215,8 +215,8 @@ class LoadSingleSentenceClassificationDataset:
         return data, max_len
 
     def load_train_val_test_data(self, train_file_path=None,
+                                 test_file_path = None,
                                  val_file_path=None,
-                                 test_file_path=None,
                                  only_test=False):
         test_data, _ = self.data_process(file_path=test_file_path)
         test_iter = DataLoader(test_data, batch_size=self.batch_size,
@@ -605,7 +605,8 @@ class LoadSQuADQuestionAnsweringDataset(LoadSingleSentenceClassificationDataset)
                                  batch_first=False,
                                  max_len=self.max_sen_len)  # [max_len, batch_size]
         batch_label = torch.tensor(batch_label, dtype=torch.long)
-        batch_forget_labels = torch.tensor(batch_forget_labels, dtype=torch.long)
+        if self.unlearning:
+            batch_forget_labels = torch.tensor(batch_forget_labels, dtype=torch.long)
         # [max_len,batch_size] , [max_len, batch_size] , [batch_size,2], [batch_size,], [batch_size,]
         if self.unlearning:
             return batch_input, batch_seg, batch_label, batch_qid, batch_example_id, batch_feature_id, batch_map, batch_forget_labels
@@ -615,7 +616,7 @@ class LoadSQuADQuestionAnsweringDataset(LoadSingleSentenceClassificationDataset)
     def load_train_val_test_data(self, train_file_path=None,
                                  val_file_path=None,
                                  test_file_path=None,
-                                 unlearn_file_path=None,
+                                 forget_file_path=None,
                                  unlearn=False,
                                  only_test=True):
         data = self.data_process(file_path=test_file_path,
@@ -631,7 +632,11 @@ class LoadSQuADQuestionAnsweringDataset(LoadSingleSentenceClassificationDataset)
         data = self.data_process(file_path=train_file_path,
                                  is_training=True)  # 得到处理好的所有样本
         train_data, max_sen_len = data['all_data'], data['max_len']
-        _, val_data = train_test_split(train_data, test_size=0.3, random_state=2021)
+        if val_file_path is not None:
+            data = self.data_process(file_path=val_file_path, is_training=True)
+            val_data = data["all_data"]
+        else:
+            _, val_data = train_test_split(train_data, test_size=0.3, random_state=2021)
         if self.max_sen_len == 'same':
             self.max_sen_len = max_sen_len
         train_iter = DataLoader(train_data, batch_size=self.batch_size,  # 构造DataLoader
@@ -641,10 +646,10 @@ class LoadSQuADQuestionAnsweringDataset(LoadSingleSentenceClassificationDataset)
         logging.info(f"## 成功返回训练集样本（{len(train_iter.dataset)}）个、开发集样本（{len(val_iter.dataset)}）个"
                      f"测试集样本（{len(test_iter.dataset)}）个.")
         if unlearn:
-            data = self.data_process(file_path=unlearn_file_path, is_training=False)
-            unlearn_data, max_len = data['all_data'], data['max_len']
-            unlearn_iter = DataLoader(unlearn_data, batch_size=self.batch_size, shuffle=False, collate_fn=self.generate_batch)
-            return train_iter, test_iter, val_iter, unlearn_iter
+            data = self.data_process(file_path=forget_file_path, is_training=False)
+            forget_data, max_len = data['all_data'], data['max_len']
+            forget_iter = DataLoader(forget_data, batch_size=self.batch_size, shuffle=False, collate_fn=self.generate_batch)
+            return train_iter, test_iter, val_iter, forget_iter
         return train_iter, test_iter, val_iter
 
     @staticmethod
