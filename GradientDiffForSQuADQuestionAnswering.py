@@ -22,8 +22,12 @@ class ModelConfig:
         self.pretrained_model_dir = os.path.join(self.project_dir, "bert_base_uncased_english")
         self.vocab_path = os.path.join(self.pretrained_model_dir, 'vocab.txt')
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+<<<<<<< HEAD:GradientDiffForSQuADQuestionAnswering.py
         self.train_file_path = os.path.join(self.dataset_dir, 'train-v1.1.json')
         self.retain_file_path = os.path.join(self.dataset_dir, 'retain-v1.1.json')
+=======
+        self.train_file_path = os.path.join(self.dataset_dir,'train-v1.1.json' )#'train-v1.1.json'
+>>>>>>> 9c807baac1bd890f027be3eecaa120f6d1ff4fb5:UnlearnForSQuADQuestionAnswering.py
         self.test_file_path = os.path.join(self.dataset_dir, 'dev-v1.1.json')
         self.val_file_path = os.path.join(self.dataset_dir, 'dev-v1.1.json')
         self.forget_file_path = os.path.join(self.dataset_dir, 'forget-v1.1.json')
@@ -43,7 +47,12 @@ class ModelConfig:
         self.doc_stride = 128  # 滑动窗口一次滑动的长度
         self.epochs = 1
         self.model_val_per_epoch = 1
+<<<<<<< HEAD:GradientDiffForSQuADQuestionAnswering.py
         logger_init(log_file_name='gradient_difference', log_level=logging.DEBUG,
+=======
+        self.unmethod = 'GD' #
+        logger_init(log_file_name='unlearn', log_level=logging.DEBUG,
+>>>>>>> 9c807baac1bd890f027be3eecaa120f6d1ff4fb5:UnlearnForSQuADQuestionAnswering.py
                     log_dir=self.logs_save_dir)
         if not os.path.exists(self.model_save_dir):
             os.makedirs(self.model_save_dir)
@@ -131,6 +140,7 @@ def main(config, only_for_eval=False):
                                                     forget_ids_path=config.forget_ids_path,
                                                     unlearning=True
                                                     )
+<<<<<<< HEAD:GradientDiffForSQuADQuestionAnswering.py
     model = BertForQuestionAnswering(config, config.pretrained_model_dir)
     model = model.to(config.device)
     if only_for_eval:
@@ -178,6 +188,74 @@ def main(config, only_for_eval=False):
                                                 only_test=False)
         train(config)
     
+=======
+    train_iter, test_iter, val_iter, unlearn_iter = \
+        data_loader.load_train_val_test_data(train_file_path=config.train_file_path,
+                                             test_file_path=config.test_file_path,
+                                             unlearn_file_path=config.unlearn_file_path,
+                                             unlearn=True,
+                                             only_test=False)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+    lr_scheduler = get_scheduler(name='linear',
+                                 optimizer=optimizer,
+                                 num_warmup_steps=int(len(train_iter) * 0),
+                                 num_training_steps=int(config.epochs * len(train_iter)))
+    max_acc = 0
+    for epoch in range(config.epochs):
+        losses = 0
+        start_time = time.time()
+        for idx, (batch_input, batch_seg, batch_label, _, _, _, _,batch_forget_labels) in enumerate(train_iter):
+            batch_input = batch_input.to(config.device)  # [src_len, batch_size]
+            batch_seg = batch_seg.to(config.device)
+            batch_label = batch_label.to(config.device)
+            batch_forget_labels = batch_forget_labels.to(config.device)
+            padding_mask = (batch_input == data_loader.PAD_IDX).transpose(0, 1)
+            start_logits, end_logits = model(input_ids=batch_input,
+                                                   attention_mask=padding_mask,
+                                                   token_type_ids=batch_seg,
+                                                   position_ids=None,
+                                                   ) # [src_len, batch_size][batchsize,sentencelen]
+            loss, forget_loss, retain_loss = unlearn_loss(start_logits=start_logits, end_logits=end_logits,
+                                                          start_positions=batch_label[:, 0],
+                                                          end_positions=batch_label[:, 1],
+                                                      forget_labels = batch_forget_labels,
+                                                          method = config.unmethod)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            lr_scheduler.step()
+            losses += loss.item()
+            acc_start = (start_logits.argmax(1) == batch_label[:, 0]).float().mean()
+            acc_end = (end_logits.argmax(1) == batch_label[:, 1]).float().mean()
+            acc = (acc_start + acc_end) / 2
+            if idx % 10 == 0:
+                logging.info(f"Epoch: {epoch}, Batch[{idx}/{len(train_iter)}], "
+                             f"Total loss :{loss.item():.3f},  Forget loss :{forget_loss:.3f}  "
+                             f"Retain loss :{retain_loss:.3f}")
+            if idx % 100 == 0:
+                y_pred = [start_logits.argmax(1), end_logits.argmax(1)]
+                y_true = [batch_label[:, 0], batch_label[:, 1]]
+                show_result(batch_input, data_loader.vocab.itos,
+                            y_pred=y_pred, y_true=y_true)
+        end_time = time.time()
+        train_loss = losses / len(train_iter)
+        logging.info(f"Epoch: {epoch}, Train loss: "
+                     f"{train_loss:.3f}, Epoch time = {(end_time - start_time):.3f}s")
+        if (epoch + 1) % config.model_val_per_epoch == 0:
+            acc = evaluate(val_iter, model,
+                           config.device,
+                           data_loader.PAD_IDX,
+                           inference=False)
+            forget_acc = evaluate(unlearn_iter, model,
+                           config.device,
+                           data_loader.PAD_IDX,
+                           inference=False)
+            logging.info(f" ### Accuracy on val: {round(acc, 4)} max :{max_acc}")
+            logging.info(f" ### Accuracy on forget: {round(forget_acc, 4)}")
+            if acc > max_acc:
+                max_acc = acc
+            torch.save(model.state_dict(), config.unlearn_model_save_path)
+>>>>>>> 9c807baac1bd890f027be3eecaa120f6d1ff4fb5:UnlearnForSQuADQuestionAnswering.py
 
 
 def evaluate(data_iter, model, device, PAD_IDX, inference=False):
