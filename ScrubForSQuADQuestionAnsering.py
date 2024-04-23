@@ -118,10 +118,10 @@ def main(config, only_for_eval=False):
                             config.device,
                             data_loader.PAD_IDX,
                             inference=False)
-                logging.info(f" ### Accuracy on val: {round(val_acc, 4)} max :{max_acc}")
-                logging.info(f" ### Accuracy on forget: {round(forget_acc, 4)}")
                 if val_acc > max_acc:
                     max_acc = val_acc
+                logging.info(f" ### Accuracy on val: {round(val_acc, 4)} max :{max_acc}")
+                logging.info(f" ### Accuracy on forget: {round(forget_acc, 4)}")
                 torch.save(student.state_dict(), config.unlearn_model_path)
     bert_tokenize = BertTokenizer.from_pretrained(config.pretrained_model_dir).tokenize
     data_loader = LoadSQuADQuestionAnsweringDataset(vocab_path=config.vocab_path,
@@ -181,6 +181,7 @@ def main(config, only_for_eval=False):
             data_loader.load_train_val_test_data(train_file_path=config.train_file_path,
                                                 test_file_path=config.test_file_path,
                                                 forget_file_path=config.forget_file_path,
+                                                val_file_path=config.val_file_path,
                                                 unlearn=True,
                                                 only_test=False)
         train(config)

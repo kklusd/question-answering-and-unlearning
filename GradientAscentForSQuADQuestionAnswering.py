@@ -1,6 +1,5 @@
 import collections
 import sys
-import numpy as np
 sys.path.append('../')
 from model.BasicBert.BertConfig import BertConfig
 from model.DownstreamTasks.BertForQuestionAnswering import BertForQuestionAnswering
@@ -25,6 +24,7 @@ class ModelConfig:
         self.test_file_path = os.path.join(self.dataset_dir, 'dev-v1.1.json')
         self.forget_file_path = os.path.join(self.dataset_dir, 'forget-v1.1.json')
         self.retain_file_path = os.path.join(self.dataset_dir, 'retain-v1.1.json')
+        self.val_file_path = os.path.join(self.dataset_dir, 'dev-v1.1.json')
         self.forget_ids_path = os.path.join(self.dataset_dir, 'forget_ids.json')
         self.model_save_dir = os.path.join(self.project_dir, 'cache')
         self.logs_save_dir = os.path.join(self.project_dir, 'logs')
@@ -88,9 +88,7 @@ def main(config, only_for_eval=False):
                 absolute_forget_loss = forget_loss.item()
                 if config.make_up_retain:
                     assert config.make_up_batches > 0, "Make up batches must larger than 0!!!"
-                    make_up_batch_ids = np.random.randint(low=0, high=len(retain_iter), size=config.make_up_batches)
-                    for idy in make_up_batch_ids:
-                        batch_input, batch_seg, batch_label, _, _, _, _ = list(retain_iter)[idy]
+                    for idy, (batch_input, batch_seg, batch_label, _, _, _, _) in enumerate(retain_iter):
                         retain_batch_input = batch_input.to(config.device)  # [src_len, batch_size]
                         retain_batch_seg = batch_seg.to(config.device)
                         retain_batch_label = batch_label.to(config.device)
@@ -102,15 +100,14 @@ def main(config, only_for_eval=False):
                                                             start_positions=retain_batch_label[:, 0],
                                                             end_positions=retain_batch_label[:, 1])
                         loss += retain_loss
+                        if idy > config.make_up_batches:
+                            break
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 lr_scheduler.step()
                 losses += loss
                 forget_losses += absolute_forget_loss
-                acc_start = (forget_start_logits.argmax(1) == forget_batch_label[:, 0]).float().mean()
-                acc_end = (forget_end_logits.argmax(1) == forget_batch_label[:, 1]).float().mean()
-                acc = (acc_start + acc_end) / 2
                 if idx % 10 == 0:
                     logging.info(f"Epoch: {epoch}, Batch[{idx}/{len(forget_iter)}], "
                                 f"Forget loss :{absolute_forget_loss:.3f}, "
@@ -135,8 +132,9 @@ def main(config, only_for_eval=False):
                             inference=False)
                 if val_acc > max_acc:
                     max_acc = val_acc
-                logging.info(f" ### Accuracy on val: {round(acc, 4)} max :{max_acc}")
+                logging.info(f" ### Accuracy on val: {round(val_acc, 4)} max :{max_acc}")
                 logging.info(f" ### Accuracy on forget: {round(forget_acc, 4)}")
+                torch.save(model.state_dict(), config.unlearn_model_path)
     bert_tokenize = BertTokenizer.from_pretrained(config.pretrained_model_dir).tokenize
     data_loader = LoadSQuADQuestionAnsweringDataset(vocab_path=config.vocab_path,
                                                     tokenizer=bert_tokenize,
@@ -152,6 +150,7 @@ def main(config, only_for_eval=False):
         data_loader.load_train_val_test_data(train_file_path=config.retain_file_path,
                                             test_file_path=config.test_file_path,
                                             forget_file_path=config.forget_file_path,
+                                            val_file_path=config.val_file_path,
                                             unlearn=True,
                                             only_test=False)
     model = BertForQuestionAnswering(config, config.pretrained_model_dir)
@@ -171,13 +170,13 @@ def main(config, only_for_eval=False):
                     config.device,
                     data_loader.PAD_IDX,
                     inference=False)
-        retain_acc = evaluate(retain_iter, model, 
-                              config.device, 
-                              data_loader.PAD_IDX,
-                              inference=False)
+        # retain_acc = evaluate(retain_iter, model, 
+        #                       config.device, 
+        #                       data_loader.PAD_IDX,
+        #                       inference=False)
         print(f" ### Accuracy on val: {round(val_acc, 4)}")
         print(f" ### Accuracy on forget: {round(forget_acc, 4)}")
-        print(f" ### Accuracy on retain: {round(retain_acc, 4)}")
+        # print(f" ### Accuracy on retain: {round(retain_acc, 4)}")
     else:
         if os.path.exists(config.original_model_path):
             loaded_paras = torch.load(config.original_model_path, map_location=config.device)
