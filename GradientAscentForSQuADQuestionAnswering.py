@@ -29,7 +29,7 @@ class ModelConfig:
         self.model_save_dir = os.path.join(self.project_dir, 'cache')
         self.logs_save_dir = os.path.join(self.project_dir, 'logs')
         self.original_model_path = os.path.join(self.model_save_dir, 'original_model.pt')
-        self.unlearn_model_save_path = os.path.join(self.model_save_dir, 'gradient_ascent_model.pt')
+        self.unlearn_model_path = os.path.join(self.model_save_dir, 'gradient_ascent_model.pt')
         self.n_best_size = 10  # 对预测出的答案近后处理时，选取的候选答案数量
         self.max_answer_len = 30  # 在对候选进行筛选时，对答案最大长度的限制
         self.is_sample_shuffle = True  # 是否对训练集进行打乱
