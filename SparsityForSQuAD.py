@@ -1,5 +1,14 @@
+import copy
+import os
+from collections import OrderedDict
+
+import torch
+import torch.nn as nn
+import torch.optim
+import torch.utils.data
 import collections
 import sys
+from sklearn.svm import SVC
 
 sys.path.append('../')
 from model.BasicBert.BertConfig import BertConfig
@@ -13,7 +22,7 @@ import logging
 import torch
 import os
 import time
-
+import numpy as np
 
 class ModelConfig:
     def __init__(self):
@@ -30,8 +39,8 @@ class ModelConfig:
         self.forget_ids_path = os.path.join(self.dataset_dir, 'forget_ids.json')
         self.model_save_dir = os.path.join(self.project_dir, 'cache')
         self.logs_save_dir = os.path.join(self.project_dir, 'logs')
-        self.original_model_path = os.path.join(self.model_save_dir, 'model.pt')
-        self.unlearn_model_path = os.path.join(self.model_save_dir, 'gradient_difference_model.pt')
+        self.original_model_path = os.path.join(self.model_save_dir, 'original_model.pt')
+        self.unlearn_model_path = os.path.join(self.model_save_dir, 'salun_model.pt')
         self.n_best_size = 10  # 对预测出的答案近后处理时，选取的候选答案数量
         self.max_answer_len = 30  # 在对候选进行筛选时，对答案最大长度的限制
         self.is_sample_shuffle = True  # 是否对训练集进行打乱
@@ -43,7 +52,7 @@ class ModelConfig:
         self.doc_stride = 128  # 滑动窗口一次滑动的长度
         self.epochs = 1
         self.model_val_per_epoch = 1
-        logger_init(log_file_name='gradient_difference', log_level=logging.DEBUG,
+        logger_init(log_file_name='salun', log_level=logging.DEBUG,
                     log_dir=self.logs_save_dir)
         if not os.path.exists(self.model_save_dir):
             os.makedirs(self.model_save_dir)
@@ -58,43 +67,48 @@ class ModelConfig:
         for key, value in self.__dict__.items():
             logging.info(f"### {key} = {value}")
 
+
 def main(config, only_for_eval=False):
     def train(config):
         model.train()
-
+        mask = torch.load(os.path.join(config.model_save_dir, "with_{}.pt".format(0.8)))
         optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
         lr_scheduler = get_scheduler(name='linear',
-                                    optimizer=optimizer,
-                                    num_warmup_steps=int(len(train_iter) * 0),
-                                    num_training_steps=int(config.epochs * len(train_iter)))
+                                     optimizer=optimizer,
+                                     num_warmup_steps=int(len(train_iter) * 0),
+                                     num_training_steps=int(config.epochs * len(train_iter)))
         max_acc = 0
         for epoch in range(config.epochs):
             losses = 0
             start_time = time.time()
-            for idx, (batch_input, batch_seg, batch_label, _, _, _, _,batch_forget_labels) in enumerate(train_iter):
+            for idx, (batch_input, batch_seg, batch_label, _, _, _, _, batch_forget_labels) in enumerate(train_iter):
                 batch_input = batch_input.to(config.device)  # [src_len, batch_size]
                 batch_seg = batch_seg.to(config.device)
                 batch_label = batch_label.to(config.device)
                 batch_forget_labels = batch_forget_labels.to(config.device)
                 padding_mask = (batch_input == data_loader.PAD_IDX).transpose(0, 1)
                 start_logits, end_logits = model(input_ids=batch_input,
-                                                    attention_mask=padding_mask,
-                                                    token_type_ids=batch_seg,
-                                                    position_ids=None,
-                                                    )
+                                                 attention_mask=padding_mask,
+                                                 token_type_ids=batch_seg,
+                                                 position_ids=None,
+                                                 )
                 loss, forget_loss, retain_loss = unlearn_loss(start_logits=start_logits, end_logits=end_logits,
-                                                            start_positions=batch_label[:, 0],
-                                                            end_positions=batch_label[:, 1],
-                                                        forget_labels = batch_forget_labels)
+                                                              start_positions=batch_label[:, 0],
+                                                              end_positions=batch_label[:, 1],
+                                                              forget_labels=batch_forget_labels)
                 optimizer.zero_grad()
                 loss.backward()
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        param.grad *= mask[name]  # 这里乘
+
                 optimizer.step()
                 lr_scheduler.step()
                 losses += loss.item()
                 if idx % 10 == 0:
                     logging.info(f"Epoch: {epoch}, Batch[{idx}/{len(train_iter)}], "
-                                f"Total loss :{loss.item():.3f},  Forget loss :{forget_loss:.3f}  "
-                                f"Retain loss :{retain_loss:.3f}")
+                                 f"Total loss :{loss.item():.3f},  Forget loss :{forget_loss:.3f}  "
+                                 f"Retain loss :{retain_loss:.3f}")
                 if idx % 100 == 0:
                     y_pred = [start_logits.argmax(1), end_logits.argmax(1)]
                     y_true = [batch_label[:, 0], batch_label[:, 1]]
@@ -103,21 +117,22 @@ def main(config, only_for_eval=False):
             end_time = time.time()
             train_loss = losses / len(train_iter)
             logging.info(f"Epoch: {epoch}, Unlearn loss: "
-                        f"{train_loss:.3f}, Epoch time = {(end_time - start_time):.3f}s")
+                         f"{train_loss:.3f}, Epoch time = {(end_time - start_time):.3f}s")
             if (epoch + 1) % config.model_val_per_epoch == 0:
                 val_acc = evaluate(val_iter, model,
-                            config.device,
-                            data_loader.PAD_IDX,
-                            inference=False)
+                                   config.device,
+                                   data_loader.PAD_IDX,
+                                   inference=False)
                 forget_acc = evaluate(forget_iter, model,
-                            config.device,
-                            data_loader.PAD_IDX,
-                            inference=False)
+                                      config.device,
+                                      data_loader.PAD_IDX,
+                                      inference=False)
                 logging.info(f" ### Accuracy on val: {round(val_acc, 4)} max :{max_acc}")
                 logging.info(f" ### Accuracy on forget: {round(forget_acc, 4)}")
                 if val_acc > max_acc:
                     max_acc = val_acc
                 torch.save(model.state_dict(), config.unlearn_model_path)
+
     bert_tokenize = BertTokenizer.from_pretrained(config.pretrained_model_dir).tokenize
     data_loader = LoadSQuADQuestionAnsweringDataset(vocab_path=config.vocab_path,
                                                     tokenizer=bert_tokenize,
@@ -142,21 +157,21 @@ def main(config, only_for_eval=False):
             raise ValueError("You should have an unlearned model!!!")
         model = model.to(config.device)
         retain_iter, test_iter, val_iter, forget_iter = \
-        data_loader.load_train_val_test_data(train_file_path=config.retain_file_path,
-                                            test_file_path=config.test_file_path,
-                                            val_file_path=config.val_file_path,
-                                            forget_file_path=config.forget_file_path,
-                                            only_test=False)
+            data_loader.load_train_val_test_data(train_file_path=config.retain_file_path,
+                                                 test_file_path=config.test_file_path,
+                                                 val_file_path=config.val_file_path,
+                                                 forget_file_path=config.forget_file_path,
+                                                 only_test=False)
         val_acc = evaluate(val_iter, model,
-                            config.device,
-                            data_loader.PAD_IDX,
-                            inference=False)
+                           config.device,
+                           data_loader.PAD_IDX,
+                           inference=False)
         forget_acc = evaluate(forget_iter, model,
-                    config.device,
-                    data_loader.PAD_IDX,
-                    inference=False)
-        # retain_acc = evaluate(retain_iter, model, 
-        #                       config.device, 
+                              config.device,
+                              data_loader.PAD_IDX,
+                              inference=False)
+        # retain_acc = evaluate(retain_iter, model,
+        #                       config.device,
         #                       data_loader.PAD_IDX,
         #                       inference=False)
         # print(f" ### Accuracy on retain: {round(retain_acc, 4)}")
@@ -167,19 +182,17 @@ def main(config, only_for_eval=False):
         if os.path.exists(config.original_model_path):
             loaded_paras = torch.load(config.original_model_path, map_location=config.device)
             model.load_state_dict(loaded_paras)
-            logging.info("## 成功载入已有模型，进行追加训练......")
+            logging.info("## 成功载入已有模型，开始unlearning......")
         else:
             raise ValueError("You should have a finetuned model!!!")
         train_iter, test_iter, val_iter, forget_iter = \
             data_loader.load_train_val_test_data(train_file_path=config.train_file_path,
-                                                test_file_path=config.test_file_path,
-                                                forget_file_path=config.forget_file_path,
-                                                unlearn=True,
-                                                only_test=False)
+                                                 test_file_path=config.test_file_path,
+                                                 forget_file_path=config.forget_file_path,
+                                                 val_file_path=config.val_file_path,
+                                                 unlearn=True,
+                                                 only_test=False)
         train(config)
-    
-
-
 def evaluate(data_iter, model, device, PAD_IDX, inference=False):
     model.eval()
     with torch.no_grad():
@@ -240,7 +253,7 @@ def show_result(batch_input, itos, num_show=5, y_pred=None, y_true=None):
         count += 1
 
 
-def inference(config, method):
+def inference(config):
     bert_tokenize = BertTokenizer.from_pretrained(config.pretrained_model_dir).tokenize
     data_loader = LoadSQuADQuestionAnsweringDataset(vocab_path=config.vocab_path,
                                                     tokenizer=bert_tokenize,
@@ -251,8 +264,7 @@ def inference(config, method):
                                                     max_answer_length=config.max_answer_len,
                                                     max_position_embeddings=config.max_position_embeddings,
                                                     pad_index=config.pad_token_id,
-                                                    n_best_size=config.n_best_size,
-                                                    unlearning=True)
+                                                    n_best_size=config.n_best_size)
     test_iter, all_examples = data_loader.load_train_val_test_data(test_file_path=config.test_file_path,
                                                                    only_test=True)
     model = BertForQuestionAnswering(config,
@@ -268,11 +280,121 @@ def inference(config, method):
     all_result_logits = evaluate(test_iter, model, config.device,
                                  data_loader.PAD_IDX, inference=True)
     data_loader.write_prediction(test_iter, all_examples,
-                                 all_result_logits, config.dataset_dir, method)
+                                 all_result_logits, config.dataset_dir)
+
+def save_gradient_ratio(data_loader, model, args,PAD_IDX):
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+
+    gradients = {}
+
+    model.eval()
+
+    for name, param in model.named_parameters():
+        gradients[name] = 0
 
 
-if __name__ == '__main__':
-    model_config = ModelConfig()
-    # main(config=model_config, only_for_eval=False)
-    model_config.test_file_path = model_config.forget_file_path
-    inference(model_config, "graddiff_forget")
+    for idx, (batch_input, batch_seg, batch_label, _, _, _, _, batch_forget_labels) in enumerate(data_loader):
+        batch_input = batch_input.to(config.device)  # [src_len, batch_size]
+        batch_seg = batch_seg.to(config.device)
+        batch_label = batch_label.to(config.device)
+        batch_forget_labels = batch_forget_labels.to(config.device)
+        padding_mask = (batch_input == PAD_IDX).transpose(0, 1)
+        start_logits, end_logits = model(input_ids=batch_input,
+                                         attention_mask=padding_mask,
+                                         token_type_ids=batch_seg,
+                                         position_ids=None,
+                                         )
+        loss, forget_loss, retain_loss = unlearn_loss(start_logits=start_logits, end_logits=end_logits,
+                                                      start_positions=batch_label[:, 0],
+                                                      end_positions=batch_label[:, 1],
+                                                      forget_labels=batch_forget_labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        with torch.no_grad():
+            for name, param in model.named_parameters():  #超多个
+                if param.grad is not None:
+                    gradients[name] += param.grad.data
+
+
+    with torch.no_grad():
+        for name in gradients:
+            if type(gradients[name]) is int:
+                gradients[name] = torch.tensor(0).to(config.device)
+            else:
+                gradients[name] = torch.abs_(gradients[name])
+
+
+    threshold = 0.8
+    i = threshold
+    sorted_dict_positions = {}
+    hard_dict = {}
+
+    # Concatenate all tensors into a single tensor 巨巨长
+    all_elements = - torch.cat([tensor.flatten() for tensor in gradients.values()])  #print([len(tensor.flatten()) for tensor in gradients.values()])[1728, 64, 64, 36864, 64, 64, 36864, 64, 64, 36864, 64, 64, 36864, 64, 64, 73728, 128, 128, 147456, 128, 128, 8192, 128
+
+    # Calculate the threshold index for the top 10% elements
+    threshold_index = int(len(all_elements) * i)
+
+    # Calculate positions of all elements 返回对一个数列从小到大排列后，各个元素对应位置
+    positions = torch.argsort(all_elements)
+    ranks = torch.argsort(positions)
+
+    start_index = 0
+    for key, tensor in gradients.items():
+        num_elements = tensor.numel()
+        # tensor_positions = positions[start_index: start_index + num_elements]
+        tensor_ranks = ranks[start_index : start_index + num_elements]  #返回他们在刚才大tensor中的位置
+
+        sorted_positions = tensor_ranks.reshape(tensor.shape) #返回原shape
+        sorted_dict_positions[key] = sorted_positions
+
+        # Set the corresponding elements to 1
+        threshold_tensor = torch.zeros_like(tensor_ranks)
+        threshold_tensor[tensor_ranks < threshold_index] = 1  # gradient rank小于前i的赋值1
+        threshold_tensor = threshold_tensor.reshape(tensor.shape)
+        hard_dict[key] = threshold_tensor
+        start_index += num_elements
+
+    torch.save(hard_dict, os.path.join(args.model_save_dir, "with_{}.pt".format(i)))
+
+
+
+if __name__ == "__main__":
+    config = ModelConfig()
+    bert_tokenize = BertTokenizer.from_pretrained(config.pretrained_model_dir).tokenize
+    data_loader = LoadSQuADQuestionAnsweringDataset(vocab_path=config.vocab_path,
+                                                    tokenizer=bert_tokenize,
+                                                    batch_size=config.batch_size,
+                                                    max_sen_len=config.max_sen_len,
+                                                    max_query_length=config.max_query_len,
+                                                    max_position_embeddings=config.max_position_embeddings,
+                                                    pad_index=config.pad_token_id,
+                                                    is_sample_shuffle=config.is_sample_shuffle,
+                                                    doc_stride=config.doc_stride,
+                                                    forget_ids_path=config.forget_ids_path,
+                                                    unlearning=True
+                                                    )
+    model = BertForQuestionAnswering(config, config.pretrained_model_dir)
+    model = model.to(config.device)
+    if os.path.exists(config.unlearn_model_path):
+        loaded_paras = torch.load(config.unlearn_model_path, map_location=config.device)
+        model.load_state_dict(loaded_paras)
+        logging.info("## 成功载入已有模型，进行追加训练......")
+    else:
+        raise ValueError("You should have an unlearned model!!!")
+    model = model.to(config.device)
+    train_iter, test_iter, val_iter, forget_iter = \
+        data_loader.load_train_val_test_data(train_file_path=config.train_file_path,
+                                             test_file_path=config.test_file_path,
+                                             forget_file_path=config.forget_file_path,
+                                             unlearn=True,
+                                             only_test=False)
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "")
+    model.eval()
+    PAD_IDX = data_loader.PAD_IDX
+    save_gradient_ratio(forget_iter, model, config,PAD_IDX)
+#---------------------------------------------------------------------
+    main(config= config, only_for_eval=False)

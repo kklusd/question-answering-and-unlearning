@@ -753,7 +753,7 @@ class LoadSQuADQuestionAnsweringDataset(LoadSingleSentenceClassificationDataset)
         output_text = orig_text[orig_start_position:(orig_end_position + 1)]
         return output_text
 
-    def write_prediction(self, test_iter, all_examples, logits_data, output_dir):
+    def write_prediction(self, test_iter, all_examples, logits_data, output_dir, method="original"):
         """
         根据预测得到的logits将预测结果写入到本地文件中
         :param test_iter:
@@ -828,9 +828,9 @@ class LoadSQuADQuestionAnsweringDataset(LoadSingleSentenceClassificationDataset)
         for k, v in prelim_predictions.items():
             best_results[k] = v[0].text  # 取最好的第一个结果
             all_n_best_results[k] = v  # 保存所有预测结果
-        with open(os.path.join(output_dir, f"best_result.json"), 'w') as f:
+        with open(os.path.join(output_dir, method + "_best_result.json"), 'w') as f:
             f.write(json.dumps(best_results, indent=4) + '\n')
-        with open(os.path.join(output_dir, f"best_n_result.json"), 'w') as f:
-            f.write(json.dumps(all_n_best_results, indent=4) + '\n')
+        # with open(os.path.join(output_dir, f"best_n_result.json"), 'w') as f:
+        #     f.write(json.dumps(all_n_best_results, indent=4) + '\n')
 
 

@@ -57,12 +57,12 @@ def evaluate(dataset, predictions):
     for article in dataset:
         for paragraph in article['paragraphs']:
             for qa in paragraph['qas']:
-                total += 1
                 if qa['id'] not in predictions:
                     message = 'Unanswered question ' + qa['id'] + \
                               ' will receive score 0.'
                     print(message, file=sys.stderr)
                     continue
+                total += 1
                 ground_truths = list(map(lambda x: x['text'], qa['answers']))
                 prediction = predictions[qa['id']]
                 exact_match += metric_max_over_ground_truths(

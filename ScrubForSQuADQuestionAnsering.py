@@ -13,6 +13,7 @@ import logging
 import torch
 import os
 import time
+from tqdm import tqdm
 
 
 class ModelConfig:
@@ -193,7 +194,7 @@ def evaluate(data_iter, model, device, PAD_IDX, inference=False):
     with torch.no_grad():
         acc_sum, n = 0.0, 0
         all_results = collections.defaultdict(list)
-        for batch_input, batch_seg, batch_label, batch_qid, _, batch_feature_id, _, _ in data_iter:
+        for batch_input, batch_seg, batch_label, batch_qid, _, batch_feature_id, _ in tqdm(data_iter):
             batch_input = batch_input.to(device)  # [src_len, batch_size]
             batch_seg = batch_seg.to(device)
             batch_label = batch_label.to(device)
@@ -248,7 +249,7 @@ def show_result(batch_input, itos, num_show=5, y_pred=None, y_true=None):
         count += 1
 
 
-def inference(config):
+def inference(config, method):
     bert_tokenize = BertTokenizer.from_pretrained(config.pretrained_model_dir).tokenize
     data_loader = LoadSQuADQuestionAnsweringDataset(vocab_path=config.vocab_path,
                                                     tokenizer=bert_tokenize,
@@ -275,10 +276,11 @@ def inference(config):
     all_result_logits = evaluate(test_iter, model, config.device,
                                  data_loader.PAD_IDX, inference=True)
     data_loader.write_prediction(test_iter, all_examples,
-                                 all_result_logits, config.dataset_dir)
+                                 all_result_logits, config.dataset_dir, method)
 
 
 if __name__ == '__main__':
     model_config = ModelConfig()
-    main(config=model_config, only_for_eval=False)
-    # inference(model_config)
+    # main(config=model_config, only_for_eval=False)
+    model_config.test_file_path = model_config.forget_file_path
+    inference(model_config, "scrub_forget")
